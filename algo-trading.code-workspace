@@ -5,6 +5,12 @@
 		},
 		{
 			"path": "../../../../../../home/beatsworking/anaconda3/lib/python3.9/site-packages/btoandav20"
+		},
+		{
+			"path": "../prediction-models"
+		},
+		{
+			"path": "../backtrader"
 		}
 	],
 	"settings": {

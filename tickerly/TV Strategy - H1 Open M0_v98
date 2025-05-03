@@ -1,0 +1,288 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BeatsW0rking
+
+//@version=6
+strategy("H1 Open M0", overlay=true, margin_long=0, margin_short=0, initial_capital =1000)
+import TradingView/ta/8
+GRP0 = 'Times'
+i_buffer_ticks = input.int(defval=5, title="SL Buffer Ticks") * syminfo.mintick
+buffer = syminfo.mintick * i_buffer_ticks
+qty=1
+i_from = input.time(defval = timestamp("01 Oct 2024 00:00 +0000"), title = "Backtest From")
+i_thru = input.time(defval = timestamp("31 Oct 2024 00:00 +0000"), title = "Backtest Thru")
+i_minSL_Ticks = 40
+i_scalpWindow = input.bool(true, 'Track IFVG Window -', group=GRP0, inline='H1')
+i_startTime = input.int(50, 'Start Minute',group=GRP0, inline='H1')
+i_endTime = input.int(10, 'End Minute', group=GRP0, inline='H1')
+tz = 'America/New_York'
+date() => time >= i_from and time <= i_thru 
+
+tod() => 
+    h = hour(time, tz) 
+    h == 2 or h == 3 or h == 4 or h == 7 or h == 10 or h == 11 or h == 12 or h == 13 or h == 14 or h == 16 or h == 18 or h == 20
+// validWindow = not i_scalpWindow or (minute(time[2]) > i_startTime or minute(time[2]) < i_endTime)
+
+// [m1_open, m1_high, m1_low, m1_close, m1_time] = request.security_lower_tf(syminfo.tickerid, "1", [open, high, low, close, time])
+
+// size = array.size(m1_time)
+
+// if size > 0
+//     int first_m1_time = array.get(m1_time, 0)
+//     float first_m1_open = array.get(m1_open, 0)
+//     float first_m1_high = array.get(m1_high, 0)
+//     float first_m1_low = array.get(m1_low, 0)
+//     float first_m1_close = array.get(m1_close, 0)
+i_minute_to_exit = input.int(defval=58, title="Exit at Minute")
+
+i_use_trailing_sl = input.bool(defval=false, title="Use Trailing SL?")
+i_use_initial_sl = input.bool(defval=true,  title="Use Initial SL?")
+i_use_be_sl = input.bool(defval=true, title="Move to BE?")
+i_use_take_profit = input.bool(defval=true, title="Use Take Profit?")
+
+i_tp1_ticks = input.int(defval=50, title="TP1 Ticks") * syminfo.mintick
+i_tp2_ticks = input.int(defval=75, title="TP2 Ticks") * syminfo.mintick
+i_tp3_ticks = input.int(defval=100, title="TP3 Ticks") *syminfo.mintick
+
+i_tp1_size = input.int(defval=1, title="TP1 Contracts")
+i_tp2_size = input.int(defval=1, title="TP2 Contracts") 
+i_tp3_size = input.int(defval=1, title="TP3 Contracts") 
+tp1_pc = int(i_tp1_size / (i_tp1_size + i_tp2_size + i_tp3_size) *100)
+tp2_pc = int(i_tp2_size / (i_tp1_size + i_tp2_size + i_tp3_size) *100)
+tp3_pc = 100 - tp1_pc - tp2_pc // int(i_tp3_size / (i_tp1_size + i_tp2_size + i_tp3_size) *100)
+
+i_trail_offset = input.int(defval=100, title="SL Trail Ticks") *  syminfo.mintick
+i_trail_points = 0
+
+i_initial_sl = input.int(defval=30, title="Initial SL Ticks") * syminfo.mintick
+i_initial_sl_to_be = input.int(defval=15, title="Move SL to BE after +ve Points") *  syminfo.mintick
+
+// i_re_enter_count = input.int(defval=2, title="No. of times to re-enter on SL") 
+
+var entry_count = 0
+var last_signal_long = false
+var last_signal_short = false
+var entry_price = 0.0
+
+
+calcQuantity(entryPrice, stopPrice)=>
+    accountBalance = strategy.equity
+    riskPercent = 0.01
+    riskAmount = 10 // accountBalance * riskPercent // (riskPercent / 100)
+
+    // Get tick size for instrument and calculate stop loss distance in price terms
+    tickPerPoint = 1 / syminfo.mintick
+    riskPoints = math.abs(entryPrice - stopPrice) //* tickPerPoint
+
+    // Calculate position size based on risk and stop loss distance
+    orderSize = riskAmount / (riskPoints * syminfo.pointvalue)
+    log.info('order size:' + str.tostring(orderSize) + ', RiskAmount: ' + str.tostring(riskAmount) + ', accountBalance:' + str.tostring(accountBalance) + ', RiskPoints: '+ str.tostring(riskPoints))
+    orderSize
+
+//     log.info('1st_m1_time: ' + str.format_time(first_m1_time, 'yyyy-MM-dd HH:mm Z') + ', O:' + str.tostring(first_m1_open)+ ', H:' + str.tostring(first_m1_high)+ ', L::' + str.tostring(first_m1_low)+ ', C:' + str.tostring(first_m1_close))
+bracket_bar() =>
+    // Set Long above high
+    qtyLong = calcQuantity(high+buffer, low - buffer)
+    qtyShort = calcQuantity(low - buffer, high+buffer)
+    strategy.entry('long_id', strategy.long, qtyLong, stop=high+buffer, oca_name='bracket', oca_type=strategy.oca.cancel, comment='Bracketing M0 of H' + str.tostring(hour(time,tz)) + ' E:' + str.tostring(high+buffer) + ' - Long')
+    strategy.entry('short_id', strategy.short, qtyShort, stop=low-buffer, oca_name='bracket', oca_type=strategy.oca.cancel, comment='Bracketing M0 of H'+ str.tostring(hour(time,tz)) + ' E:' + str.tostring(low-buffer) + ' - Short')
+
+    //Long Exits
+    if i_use_trailing_sl
+        if i_use_take_profit
+            strategy.exit(id='longexit_TP_TSL_01', from_entry="long_id", profit=i_tp1_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent = tp1_pc, comment_trailing='TSL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='longexit_TP_TSL_02', from_entry="long_id", profit=i_tp2_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent = tp2_pc, comment_trailing='TSL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='longexit_TP_TSL_03', from_entry="long_id", profit=i_tp3_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, comment_trailing='TSL3 Hit', comment_profit='TP3 Hit')
+        else
+            strategy.exit(id='longexit_TSL', from_entry="long_id", trail_points=i_trail_points, trail_offset=i_trail_offset)
+    else if i_use_initial_sl
+        if i_use_take_profit
+            strategy.exit(id='longexit_TP_01', from_entry="long_id", profit=i_tp1_ticks, qty_percent=tp1_pc, stop=low - buffer, comment_loss='SL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='longexit_TP_02', from_entry="long_id", profit=i_tp2_ticks, qty_percent=tp2_pc, stop=low - buffer, comment_loss='SL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='longexit_TP_03', from_entry="long_id", profit=i_tp3_ticks, stop=low - buffer, comment_loss='SL3 Hit', comment_profit='TP3 Hit')
+        else
+            // strategy.exit(id='longexit_SL', from_entry="Long 1001", loss=i_initial_sl, qty_percent=100, comment='Initial Stop Hit')
+            strategy.exit(id='long_stop_loss', from_entry='long_id', stop=low - buffer, qty_percent=100, comment='Initial Stop Hit')
+    else
+        if i_use_take_profit
+            strategy.exit(id='longexit_TP_01', from_entry="long_id", profit=i_tp1_ticks, qty_percent=tp1_pc, comment='TP1 Hit')
+            strategy.exit(id='longexit_TP_02', from_entry="long_id", profit=i_tp2_ticks, qty_percent=tp2_pc, comment='TP2 Hit')
+            strategy.exit(id='longexit_TP_03', from_entry="long_id", profit=i_tp3_ticks, comment='TP3 Hit') 
+
+    //Short Exits
+    if i_use_trailing_sl
+        if i_use_take_profit
+            strategy.exit(id='shortexit_TP_TSL_01', from_entry="short_id", profit=i_tp1_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent=tp1_pc, comment_trailing='TSL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='shortexit_TP_TSL_02', from_entry="short_id", profit=i_tp2_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent=tp2_pc, comment_trailing='TSL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='shortexit_TP_TSL_03', from_entry="short_id", profit=i_tp3_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, comment_trailing='TSL3 Hit', comment_profit='TP3 Hit')
+        else
+            strategy.exit(id='shortexit_TSL', from_entry="short_id", trail_points=i_trail_points, trail_offset=i_trail_offset, comment='Trailing Stop Hit')
+    else if i_use_initial_sl
+        if i_use_take_profit
+            strategy.exit(id='shortexit_TP_SL_01', from_entry="short_id", profit=i_tp1_ticks, qty_percent=tp1_pc, stop=high + buffer, comment_loss='SL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='shortexit_TP_SL_02', from_entry="short_id", profit=i_tp2_ticks, qty_percent=tp2_pc, stop=high + buffer, comment_loss='SL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='shortexit_TP_SL_03', from_entry="short_id", profit=i_tp3_ticks,  stop=high + buffer, comment_loss='SL3 Hit', comment_profit='TP3 Hit')
+        else
+            strategy.exit(id='shortexit_SL', from_entry="short_id", stop=high + buffer, qty_percent=100, comment='Initial Stop Hit')
+    else
+        if i_use_take_profit
+            // log.info('tp1: ' + str.tostring(i_tp1_ticks) + 'tp1 qty: ' + str.tostring(tp1_pc)) //+ (i_tp1_ticks * syminfo.mintick))
+            strategy.exit(id='shortexit_TP_01', from_entry="short_id", profit=i_tp1_ticks, qty_percent=tp1_pc, comment='TP1 Hit')
+            strategy.exit(id='shortexit_TP_02', from_entry="short_id", profit=i_tp2_ticks, qty_percent=tp2_pc, comment='TP2 Hit')
+            strategy.exit(id='shortexit_TP_03', from_entry="short_id", profit=i_tp3_ticks, comment='TP3 Hit')  
+// strategy.exit(id='long_stop_loss', from_entry='long_id', stop=low - buffer)
+// strategy.exit(id='short_stop_loss', from_entry='short_id', stop=high + buffer)
+
+goLong() =>
+     // Get Long via Market Order - SL below Low
+    entryPrice = close
+    sl_price = low - buffer
+    qtyLong = calcQuantity(close, sl_price)
+    strategy.entry('long_id', strategy.long, qtyLong, comment='Entry M0 of H' + str.tostring(hour(time,tz)) + ' E:' + str.tostring(entryPrice) + ' - Long. SL:' + str.tostring(sl_price))
+    strategy.exit(id='long_stop_loss', from_entry='long_id', stop=sl_price)
+
+goShort() =>
+    // Get short via Market Order - SL above High
+    entryPrice = close
+    sl_price = high + buffer
+    qtyShort = calcQuantity(close, sl_price)
+    strategy.entry('short_id', strategy.short, qtyShort, comment='Entry M0 of H' + str.tostring(hour(time,tz)) + ' E:' + str.tostring(entryPrice) + ' - Short. SL:' + str.tostring(sl_price))
+    strategy.exit(id='short_stop_loss', from_entry='short_id', stop=sl_price)
+
+
+if minute(time) == 0 and tod() 
+    strategy.cancel_all()
+    bracket_bar() 
+
+// lowest =ta.lowestbars(low, 60)
+// highest = ta.highestbars(high, 60)
+
+// if minute(time) == 0 //and tod() 
+//     if lowest == 0
+//         goLong()
+//     if highest == 0
+//         goShort()
+
+// if minute(time) == i_minute_to_exit
+//     strategy.close(id='short_id', comment='Closing Short', immediately = true)
+//     strategy.close(id='long_id', comment='Closing Long', immediately = true)
+
+
+
+
+
+// manageLong() =>
+//     // strategy.cancel_all()
+//     // strategy.close_all()
+
+//     // strategy.order("Long 1001", strategy.long, qty=(i_tp1_size + i_tp2_size + i_tp3_size))
+
+//     if i_use_trailing_sl
+//         if i_use_take_profit
+//             strategy.exit(id='longexit_TP_TSL_01', from_entry="Long 1001", profit=i_tp1_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent = tp1_pc, comment_trailing='TSL1 Hit', comment_profit='TP1 Hit')
+//             strategy.exit(id='longexit_TP_TSL_02', from_entry="Long 1001", profit=i_tp2_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent = tp2_pc, comment_trailing='TSL2 Hit', comment_profit='TP2 Hit')
+//             strategy.exit(id='longexit_TP_TSL_03', from_entry="Long 1001", profit=i_tp3_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent = tp3_pc, comment_trailing='TSL3 Hit', comment_profit='TP3 Hit')
+//         else
+//             strategy.exit(id='longexit_TSL', from_entry="Long 1001", trail_points=i_trail_points, trail_offset=i_trail_offset)
+//     else if i_use_initial_sl
+//         if i_use_take_profit
+//             strategy.exit(id='longexit_TP_01', from_entry="Long 1001", profit=i_tp1_ticks, qty_percent=tp1_pc, loss=i_initial_sl, comment_loss='SL1 Hit', comment_profit='TP1 Hit')
+//             strategy.exit(id='longexit_TP_02', from_entry="Long 1001", profit=i_tp2_ticks, qty_percent=tp2_pc, loss=i_initial_sl, comment_loss='SL2 Hit', comment_profit='TP2 Hit')
+//             strategy.exit(id='longexit_TP_03', from_entry="Long 1001", profit=i_tp3_ticks, qty_percent=tp3_pc, loss=i_initial_sl, comment_loss='SL3 Hit', comment_profit='TP3 Hit')
+//         else
+//             strategy.exit(id='longexit_SL', from_entry="Long 1001", loss=i_initial_sl, qty_percent=100, comment='Initial Stop Hit')
+//     else
+//         if i_use_take_profit
+//             strategy.exit(id='longexit_TP_01', from_entry="Long 1001", profit=i_tp1_ticks, qty_percent=tp1_pc, comment='TP1 Hit')
+//             strategy.exit(id='longexit_TP_02', from_entry="Long 1001",profit=i_tp2_ticks, qty_percent=tp2_pc, comment='TP2 Hit')
+//             strategy.exit(id='longexit_TP_03', from_entry="Long 1001",profit=i_tp3_ticks, qty_percent=tp3_pc, comment='TP3 Hit')
+
+// manageShort()=>
+//     // strategy.cancel_all()
+//     // strategy.close_all()
+//     // strategy.order("Short 1010", strategy.short, qty=(i_tp1_size + i_tp2_size + i_tp3_size))
+//     if i_use_trailing_sl
+//         if i_use_take_profit
+//             strategy.exit(id='shortexit_TP_TSL_01', from_entry="Short 1010", profit=i_tp1_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent=tp1_pc, comment_trailing='TSL1 Hit', comment_profit='TP1 Hit')
+//             strategy.exit(id='shortexit_TP_TSL_02', from_entry="Short 1010", profit=i_tp2_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent=tp2_pc, comment_trailing='TSL2 Hit', comment_profit='TP2 Hit')
+//             strategy.exit(id='shortexit_TP_TSL_03', from_entry="Short 1010", profit=i_tp3_ticks, trail_points=i_trail_points, trail_offset=i_trail_offset, qty_percent=tp3_pc, comment_trailing='TSL3 Hit', comment_profit='TP3 Hit')
+//         else
+//             strategy.exit(id='shortexit_TSL', from_entry="Short 1010", trail_points=i_trail_points, trail_offset=i_trail_offset, comment='Trailing Stop Hit')
+//     else if i_use_initial_sl
+//         if i_use_take_profit
+//             strategy.exit(id='shortexit_TP_SL_01', from_entry="Short 1010", profit=i_tp1_ticks, qty_percent=tp1_pc, loss=i_initial_sl, comment_loss='SL1 Hit', comment_profit='TP1 Hit')
+//             strategy.exit(id='shortexit_TP_SL_02', from_entry="Short 1010", profit=i_tp2_ticks, qty_percent=tp2_pc, loss=i_initial_sl, comment_loss='SL2 Hit', comment_profit='TP2 Hit')
+//             strategy.exit(id='shortexit_TP_SL_03', from_entry="Short 1010", profit=i_tp3_ticks, qty_percent=tp3_pc, loss=i_initial_sl, comment_loss='SL3 Hit', comment_profit='TP3 Hit')
+//         else
+//             strategy.exit(id='shortexit_SL', from_entry="Short 1010", loss=i_initial_sl, qty_percent=100, comment='Initial Stop Hit')
+//     else
+//         if i_use_take_profit
+//             // log.info('tp1: ' + str.tostring(i_tp1_ticks) + 'tp1 qty: ' + str.tostring(tp1_pc)) //+ (i_tp1_ticks * syminfo.mintick))
+//             strategy.exit(id='shortexit_TP_01', from_entry="Short 1010", profit=i_tp1_ticks, qty_percent=tp1_pc, comment='TP1 Hit')
+//             strategy.exit(id='shortexit_TP_02', from_entry="Short 1010", profit=i_tp2_ticks, qty_percent=tp2_pc, comment='TP2 Hit')
+//             strategy.exit(id='shortexit_TP_03', from_entry="Short 1010", profit=i_tp3_ticks, qty_percent=tp3_pc, comment='TP3 Hit')
+        
+
+// if (enterGenesisLongSignal) //and 1 ==3 //(enterLongWithTrendSignal) // or enterScalpLongSignal)
+//     entry_count := 1
+//     last_signal_long := true
+//     last_signal_short := false
+//     entry_price := close
+//     enterLong()
+
+// if (enterGenesisShortSignal) //(enterShortWithTrendSignal) //or enterScalpShortSignal)
+//     entry_count := 1
+//     last_signal_long := false
+//     last_signal_short := true
+//     entry_price := close
+//     enterShort()
+
+
+// isStratFlat = strategy.position_size == 0
+// /// Re Enter Logic ///
+// if isStratFlat
+//     // info('stratflat. Long?' + tostring(last_signal_long) + ', Short?' + tostring(last_signal_short) + ', entry_count:' + tostring(entry_count))
+//     // Do we Want to Re enter?
+//     if i_re_enter_count > entry_count -1 //we can re enter
+//         if last_signal_long and close > entry_price and close[1] < entry_price
+//             entry_count := entry_count + 1
+//             enterLong()
+//         if last_signal_short and close < entry_price and close[1] > entry_price
+//             entry_count := entry_count + 1
+//             enterShort()
+
+
+
+isStratLong = strategy.position_size > 0
+isStratShort = strategy.position_size < 0
+
+
+if i_use_be_sl
+    breakevenPriceLong = strategy.position_avg_price + syminfo.mintick //(i_initial_sl_to_be * syminfo.mintick)
+    breakevenPriceShort = strategy.position_avg_price - syminfo.mintick //(i_initial_sl_to_be * syminfo.mintick)
+    move_sl_to_be_long = isStratLong and close > (strategy.position_avg_price + (i_initial_sl_to_be * syminfo.mintick))
+    move_sl_to_be_short = isStratShort and close < (strategy.position_avg_price - (i_initial_sl_to_be * syminfo.mintick))
+
+    if isStratLong and move_sl_to_be_long
+        strategy.cancel_all()
+        if i_use_take_profit
+            strategy.exit(id='longexit_TP_01', limit=(strategy.position_avg_price + (i_tp1_ticks * syminfo.mintick)), stop=breakevenPriceLong, qty_percent=tp1_pc, comment_loss='BE SL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='longexit_TP_02', limit=(strategy.position_avg_price + (i_tp2_ticks * syminfo.mintick)), stop=breakevenPriceLong, qty_percent=tp2_pc, comment_loss='BE SL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='longexit_TP_03', limit=(strategy.position_avg_price + (i_tp3_ticks * syminfo.mintick)), stop=breakevenPriceLong, comment_loss='BE SL3 Hit', comment_profit='TP3 Hit')
+        else    
+            strategy.exit(id='be_long_exit', comment='Breakeven', stop=breakevenPriceLong, qty_percent=100)     
+    
+    if isStratShort and move_sl_to_be_short
+        strategy.cancel_all()
+        if i_use_take_profit
+            strategy.exit(id='shortexit_TP_01', limit=(strategy.position_avg_price - (i_tp1_ticks * syminfo.mintick)), stop=breakevenPriceShort, qty_percent=tp1_pc, comment_loss='BE SL1 Hit', comment_profit='TP1 Hit')
+            strategy.exit(id='shortexit_TP_02', limit=(strategy.position_avg_price - (i_tp2_ticks * syminfo.mintick)), stop=breakevenPriceShort, qty_percent=tp2_pc, comment_loss='BE SL2 Hit', comment_profit='TP2 Hit')
+            strategy.exit(id='shortexit_TP_03', limit=(strategy.position_avg_price - (i_tp3_ticks * syminfo.mintick)), stop=breakevenPriceShort, comment_loss='BE SL3 Hit', comment_profit='TP3 Hit')
+        else
+            strategy.exit(id='be_short_exit',  comment='Breakeven', stop=breakevenPriceShort, qty_percent=100)
+
+
+
+
+if minute(time) == i_minute_to_exit
+    strategy.close(id='short_id', comment='Closing Short', immediately = true)
+    strategy.close(id='long_id', comment='Closing Long', immediately = true)

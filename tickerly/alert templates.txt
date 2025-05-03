@@ -1,0 +1,42 @@
+{
+"ticker": "{{ticker}}",
+"action": "{{strategy.order.action}}",
+"prev_position" : "{{strategy.prev_market_position}}",
+"quantity": "{{strategy.order.contracts}}",
+"takeprofit" : "{{plot_0}}",
+"stoploss" : "{{plot_1}}",
+"pointer" : "TZErBcKHOppzu4Y2QBx9"
+}
+
+	
+{
+"ticker" : "{{ticker}}", 
+"action" : "{{strategy.order.action}}",
+"prev_position" : "{{strategy.prev_market_position}}", 
+"quantity" : "{{strategy.order.contracts}}", 
+"pointer" : "TZErBcKHOppzu4Y2QBx9"
+}
+
+
+
+test-XAU
+    101-004-25763012-004
+    761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0
+
+test-XAG
+    101-004-25763012-003
+    761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0
+
+test-NAS100
+    101-004-25763012-005
+    761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0
+
+test-genesis
+    101-004-25763012-002
+    761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0
+    
+test-poizsn
+    101-004-25763012-006
+    761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0
+
+761800c0b5f92b7499bf6dc424483a97-e529785973f0bfae604c00f7951cecf0

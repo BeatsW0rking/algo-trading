@@ -135,6 +135,7 @@ def intervalProportion(grain, interval, high_low_timestamp):
 # Main Feature Engineering
 def featureEng(df, tf_minutes):
     #Interval / Index
+    dt_trading = df.index.to_series()
     df['year'] = df.index.year
     df['quarter_of_year'] = df.index.quarter
     df['month_of_year'] = df.index.month
@@ -147,6 +148,10 @@ def featureEng(df, tf_minutes):
     df['minute_of_hour'] = df.index.minute
     df['minute_of_day'] = (df.index.hour * 60) + df.index.minute
     df['second_of_minute'] = df.index.second
+    df['day_of_week_trading'] = dt_trading.apply(lambda row: (row + timedelta(hours=7)).dayofweek)
+    df['hour_of_day_trading'] =  dt_trading.apply(lambda row:  (row + timedelta(hours=7)).hour)
+    df['minute_of_day_trading'] =  dt_trading.apply(lambda row: ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60)  
+    df['minute_of_week_trading'] =  dt_trading.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60) 
     if tf_minutes >= 1440: df.index = df.index.date
 
     # High Time Stamp
@@ -166,9 +171,9 @@ def featureEng(df, tf_minutes):
     # df['high_hour_of_week_trading_sun_0'] =  high_ts.apply(lambda row: row.hour + ((((row + timedelta(hours=7)).dayofweek+1)%7)*24))
     # df['high_hour_of_week_sun_0'] =  high_ts.apply(lambda row: row.hour + (((row.dayofweek+ 1)%7)*24))
     df['high_hour_of_week_trading'] =  high_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + (row + timedelta(hours=7)).hour) # 18:00 Sun = Hour 1 -> 16:00 Fri = 120
-    df['high_minute_of_week_trading'] =  high_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute) 
+    df['high_minute_of_week_trading'] =  high_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60) 
     df['high_hour_of_day_trading'] =  high_ts.apply(lambda row:  (row + timedelta(hours=7)).hour)
-    df['high_minute_of_day_trading'] =  high_ts.apply(lambda row: ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute)  
+    df['high_minute_of_day_trading'] =  high_ts.apply(lambda row: ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60)  
     df['high_minute_of_hour'] = high_ts.dt.minute
     df['high_minute_of_day'] = (high_ts.dt.hour * 60) + high_ts.dt.minute
     df['high_second_of_minute'] = high_ts.dt.second
@@ -189,9 +194,9 @@ def featureEng(df, tf_minutes):
     # df['low_hour_of_week'] =  low_ts.apply(lambda row: row.hour + ((row + timedelta(hours=7)).dayofweek*24))
     # df['low_hour_of_week_sun_0'] =  low_ts.apply(lambda row: row.hour + (((row.dayofweek+ 1)%7)*24))
     df['low_hour_of_week_trading'] =  low_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + (row + timedelta(hours=7)).hour)
-    df['low_minute_of_week_trading'] =  low_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute) 
+    df['low_minute_of_week_trading'] =  low_ts.apply(lambda row: ((row + timedelta(hours=7)).dayofweek*24) + ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60) 
     df['low_hour_of_day_trading'] =  low_ts.apply(lambda row: (row + timedelta(hours=7)).hour) 
-    df['low_minute_of_day_trading'] =  low_ts.apply(lambda row: ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute)   
+    df['low_minute_of_day_trading'] =  low_ts.apply(lambda row: ((row + timedelta(hours=7)).hour * 60) + (row + timedelta(hours=7)).minute - 60)   
     df['low_minute_of_hour'] = low_ts.dt.minute
     df['low_minute_of_day'] = (low_ts.dt.hour * 60) + low_ts.dt.minute
     df['low_second_of_minute'] = low_ts.dt.second
@@ -247,6 +252,14 @@ def perform_feature_eng(instrument):
     ## Daily:
     tf = 'D1'
     tf_minutes = 1440 #daily
+    start = time.time()
+    perform_feature_eng_tf(instrument, tf, tf_minutes)
+    end = time.time()
+    print(f'{datetime.today().isoformat(" ","seconds")}: {instrument} - {tf} Features Created and Serialised to Parquet in: {(end-start):.2f} seconds')
+
+     # 6 Hourly:
+    tf = 'H6'
+    tf_minutes = 360 #H6
     start = time.time()
     perform_feature_eng_tf(instrument, tf, tf_minutes)
     end = time.time()

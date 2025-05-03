@@ -1,6 +1,22 @@
 
 secret/
 data/
+__pycache__/
+.ipynb_checkpoints/
+backtraderStrategies/__pycache__/
+brokerExecution/__pycache__/
+brokerExecution/tests/__pycache__/
+data_backup/
+oanda_downloader/data/
+oanda_downloader/ml/data/
+oanda_downloader/ml/.neptune/
+oanda_downloader/ml/lightning_logs/
+oanda_downloader/ml/models/
+oanda_downloader/__pycache__/
+notebooks/.ipynb_checkpoints/
+
+*.sav
+*.parquet
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

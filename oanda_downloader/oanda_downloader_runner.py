@@ -2,6 +2,8 @@ import subprocess
 import datetime
 import argparse
 # oanda_downloader.py EUR_USD 2023 10 1 2023 10 10
+# oanda_downloader.py EUR_USD 2024 8 31 2024 11 16
+#  python oanda_downloader.py NAS100_USD 2024 11 16 2024 11 23
 
 
 

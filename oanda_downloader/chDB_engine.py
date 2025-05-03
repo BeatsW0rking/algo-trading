@@ -59,6 +59,6 @@ class OHLC_CHDB():
         res = self.db.query(full_query)
 
 
-        print(datetime.datetime.today().isoformat(" ","seconds"),":", "Inserted:", len(bars), "Bars, First Timestamp in Batch:", bars[0]["timestamp"])
+        print(datetime.datetime.today().isoformat(" ","seconds"),":", "Inserted:", len(bars),  "Bars, for: ", self.instrument, "First Timestamp in Batch:", bars[0]["timestamp"])
         res = self.db.query("select count(*) from quant.ohlc")
         print(datetime.datetime.today().isoformat(" ","seconds"), ":","chDB", "has", res, "rows" )

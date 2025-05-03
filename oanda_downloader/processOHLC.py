@@ -271,10 +271,10 @@ def dropFinalResultschDB():
     db = Session(path="/tmp/aggregated_oanda")
     db.query("drop table quant.ohlc_agg")
     
-def aggregate_samples_to_interval(sample_df, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, tzOffset, hours_skew=2):
+def aggregate_samples_to_interval(sample_df, instrument, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, tzOffset, hours_skew=2):
     print(f'Calling aggregate_samples_to_interval with start: {start}, end: {end}, interval_bucket_size: {interval_bucket_size}, interval_bucket_type: {interval_bucket_type}, tzOffset: {tzOffset}')
     query_sql = f"""
-    select sq.interval, sq.open, sq.high, sq.low, sq.close, sq.high_timestamp, sq.low_timestamp, sq.samples as samples, sq.first_sample as first_sample, sq.last_sample as last_sample 
+    select sq.interval, max(sq.open), max(sq.high), max(sq.low), max(sq.close), max(sq.high_timestamp), max(sq.low_timestamp), max(sq.samples) as samples, max(sq.first_sample) as first_sample, max(sq.last_sample) as last_sample 
     from
         (select 
         {intervalAggregateTerm},
@@ -288,7 +288,7 @@ def aggregate_samples_to_interval(sample_df, interval_bucket_size, interval_buck
         FIRST_VALUE(s5.timestamp) OVER (PARTITION BY interval ORDER BY s5.low asc, s5.timestamp) low_timestamp,
         count(*) OVER (PARTITION BY interval) as samples 
         from __s5__ as s5
-        where s5.timestamp >= toDateTime('{start}', '{tzOffset}') and s5.timestamp < toDateTime('{end}', '{tzOffset}')
+        where s5.instrument='{instrument}' and s5.timestamp >= toDateTime('{start}', '{tzOffset}') and s5.timestamp < toDateTime('{end}', '{tzOffset}')
         order by s5.timestamp
         ) as sq
     group by sq.interval, sq.open, sq.high , sq.low, sq.close, sq.high_timestamp, sq.low_timestamp, sq.samples, sq.first_sample, sq.last_sample
@@ -343,7 +343,7 @@ def runFullAggregationPipeline(day_increment, interval_bucket_size, interval_buc
     increment_end =  start + timedelta(hours=24*day_increment)
 
     while increment_end <= end:
-        agg_df = aggregate_samples_to_interval(df, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, increment_end, tzOffset, hours_skew)
+        agg_df = aggregate_samples_to_interval(df, instrument, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, increment_end, tzOffset, hours_skew)
 
         #Workout the next increment in hours (not for Week (& Month?) Interval)
         if(interval_bucket_type == 'WEEK'):
@@ -408,7 +408,25 @@ def Generate4HourlyOHLC(instrument, start, end, FXAnchor):
     intervalAggregateTerm = f"toDateTime(toStartOfInterval(s5.timestamp, INTERVAL {interval_bucket_size} {interval_bucket_type}, '{tzOffset}')) as interval"
 
     runFullAggregationPipeline(day_increment, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, instrument, tf, tzOffset, hours_skew)
-    print("Finished Hourly OHLC")
+    print("Finished 4 Hourly OHLC")
+    
+def Generate6HourlyOHLC(instrument, start, end, FXAnchor):
+    # FXAnchor = True then 1st weekly H4 Candle starts at 17:00 Sun EST (same as Daily Skew)
+    # FXAnchor = False then (Futures) 1st weekly H4 Candle starts at 18:00 Sun EST
+    tzOffset = 'EST'
+    day_increment = 5
+    interval_bucket_size = 360
+    interval_bucket_type = 'MINUTE'
+    tf = 'H6'
+    hours_skew = 2
+
+    if not FXAnchor:
+        hours_skew = 1
+
+    intervalAggregateTerm = f"toDateTime(toStartOfInterval(s5.timestamp, INTERVAL {interval_bucket_size} {interval_bucket_type}, '{tzOffset}')) as interval"
+
+    runFullAggregationPipeline(day_increment, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, instrument, tf, tzOffset, hours_skew)
+    print("Finished 6 Hourly OHLC")
 
 def GenerateDailyOHLC(instrument, start, end):
     tzOffset = 'EST'
