@@ -268,6 +268,7 @@ def clearOHLCTable():
     db = Session(path=dbpath)
     
     db.query("truncate TABLE IF EXISTS quant.ohlc_agg")
+    db.close()
     
 def loadOptimisedSampleData(parquetFile):
     #Load optimised dataframe from parquet file
@@ -373,7 +374,6 @@ def outputFinalDataSet(instrument, tf):
     end = time.time()
     print(end - start)
     dfres = None
-
 
 def aggregate_samples_to_interval(sample_df, instrument, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, tzOffset, hours_skew=2):
     print(f'Calling aggregate_samples_to_interval with start: {start}, end: {end}, interval_bucket_size: {interval_bucket_size}, interval_bucket_type: {interval_bucket_type}, tzOffset: {tzOffset}')
@@ -490,11 +490,11 @@ def GenerateMinuteOHLC(instrument, start, end, minutes):
 # df_tmp.query("instrument == 'NAS100_USD'").head()
 db = Session(path="/tmp/oanda_data")
 query_sql = f"""
-    --select instrument, min(timestamp) as first_sample, max(timestamp) as last_timestamp, count(*) as samples 
-    select *
+    select instrument, min(timestamp) as first_sample, max(timestamp) as last_timestamp, count(*) as samples 
+    --select *
     from quant.ohlc
     where instrument = 'NAS100_USD'
-    --group by instrument 
+    group by instrument 
     limit 10
         """
 res = db.query(query_sql, 'Dataframe') #, minutely=df_m, hourly=df_h)
@@ -502,13 +502,494 @@ res = db.query(query_sql, 'Dataframe') #, minutely=df_m, hourly=df_h)
 dfrest = res
 dfrest.head()
 
-#%% Scratch
-db = Session(path=dbpath)
-tf='M1'
-instrument = 'NAS100_USD'    
-query = f"select * from quant.ohlc_agg where instrument='{instrument}' and tf='{tf}' order by interval"
-dfres = db.query(query, 'dataframe')
-dfres.head()
+#%% Scratch Funcs
+
+def aggregate_samples_to_range(sample_df, instrument, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, tzOffset, hours_skew=2):
+    print(f'Calling aggregate_samples_to_interval with start: {start}, end: {end}, interval_bucket_size: {interval_bucket_size}, interval_bucket_type: {interval_bucket_type}, tzOffset: {tzOffset}')
+    query_sql = f"""
+    select 
+        sq.interval as interval,
+        {interval_bucket_size} as interval_size_minutes,
+        max(sq.open) as open, max(sq.high) as high, max(sq.low) as low, max(sq.close) as close, 
+        max(sq.high_timestamp) as high_timestamp, 
+        max(sq.low_timestamp) as low_timestamp,
+        COALESCE(
+            ROUND(
+                    (
+                        (toDateTime(max(sq.high_timestamp), '{tzOffset}') - sq.interval)
+                        / 
+                        ({interval_bucket_size}*60)
+                    )
+                ,2)
+        ) as high_proportion_of_interval,
+        COALESCE(
+            ROUND(
+                    (
+                        (toDateTime(max(sq.low_timestamp), '{tzOffset}') - sq.interval)
+                        / 
+                        ({interval_bucket_size}*60)
+                    )
+                ,2)
+        ) as low_proportion_of_interval,
+        max(sq.samples) as samples, 
+        max(sq.first_sample) as first_sample, max(sq.last_sample) as last_sample 
+    from
+        (select 
+        {intervalAggregateTerm},
+        FIRST_VALUE(s5.timestamp) OVER (PARTITION BY interval ORDER BY s5.timestamp asc) as first_sample,
+        FIRST_VALUE(s5.timestamp) OVER (PARTITION BY interval ORDER BY s5.timestamp desc) as last_sample,
+        FIRST_VALUE(s5.open) OVER (PARTITION BY interval ORDER BY s5.timestamp asc) open,
+        FIRST_VALUE(s5.high) OVER (PARTITION BY interval ORDER BY s5.high desc) high,
+        FIRST_VALUE(s5.low)  OVER (PARTITION BY interval ORDER BY s5.low asc) low,
+        FIRST_VALUE(s5.close) OVER (PARTITION BY interval ORDER BY s5.timestamp desc) close,
+        FIRST_VALUE(s5.timestamp) OVER (PARTITION BY interval ORDER BY s5.high desc, s5.timestamp) high_timestamp,
+        FIRST_VALUE(s5.timestamp) OVER (PARTITION BY interval ORDER BY s5.low asc, s5.timestamp) low_timestamp,
+        count(*) OVER (PARTITION BY interval) as samples 
+        from __s5__ as s5
+        where s5.instrument='{instrument}' and s5.timestamp >= toDateTime('{start}', '{tzOffset}') and s5.timestamp < toDateTime('{end}', '{tzOffset}')
+        order by s5.timestamp
+        ) as sq
+    group by sq.interval, sq.open, sq.high , sq.low, sq.close, sq.high_timestamp, sq.low_timestamp, sq.samples, sq.first_sample, sq.last_sample
+    order by sq.interval desc
+    ;
+    """
+    res = cdf.query(sql=query_sql, s5=sample_df)
+
+    dfres = res.to_pandas()
+    dfres['interval'] = dfres['interval'] * 1e9
+    dfres['interval'] = dfres['interval'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['high_timestamp'] = dfres['high_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['low_timestamp'] = dfres['low_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['first_sample'] = dfres['first_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['last_sample'] = dfres['last_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    
+    if (interval_bucket_type == 'WEEK' or (interval_bucket_type == 'MINUTE' and interval_bucket_size == 1440)):
+        dfres['interval'] = dfres['interval'] + timedelta(days=1)
+
+    # If > than Daily Interval then adjust datetime back by the original skew added to align Trading Day with Pandas Day boundary
+    if (interval_bucket_type == 'WEEK' or (interval_bucket_type == 'MINUTE' and interval_bucket_size > 60)):
+        if (interval_bucket_type == 'MINUTE' and interval_bucket_size > 60):
+            dfres['interval'] = dfres['interval'] - timedelta(hours=hours_skew)
+        dfres['high_timestamp'] = dfres['high_timestamp'] - timedelta(hours=hours_skew)
+        dfres['low_timestamp'] = dfres['low_timestamp'] - timedelta(hours=hours_skew)
+        dfres['first_sample'] = dfres['first_sample'] - timedelta(hours=hours_skew)
+        dfres['last_sample'] = dfres['last_sample'] - timedelta(hours=hours_skew)
+
+    # dfres = dfres.set_index('interval', drop=False)
+    # print(dfres.head(10))
+    # print(dfres.tail(1))
+    return dfres
+
+def GenerateRangeOHLC(instrument, start, end, minutes):
+    tzOffset = 'EST'
+    day_increment = 5
+    interval_bucket_size = minutes
+    interval_bucket_type = 'MINUTE'
+    tf = f'M{minutes}'
+
+    intervalAggregateTerm = f"toDateTime(toStartOfInterval(s5.timestamp, INTERVAL {interval_bucket_size} {interval_bucket_type}, '{tzOffset}')) as interval"
+    # intervalAggregateTerm = f"toDateTime(toStartOfInterval(s5.timestamp, INTERVAL {interval_bucket_size} {interval_bucket_type})) as interval"
+
+    # runFullAggregationPipeline(day_increment, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, instrument, tf, tzOffset)
+    parquetSampleFile =f'{baseDataPath}oanda_data_pandas.parquet' 
+    df = loadOptimisedSampleData(parquetSampleFile)
+    hours_skew=2
+    agg_df = aggregate_samples_to_range(df, instrument, interval_bucket_size, interval_bucket_type, intervalAggregateTerm, start, end, tzOffset, hours_skew)
+
+    print(f"Finished GenerateRangeOHLC={minutes} OHLC")
+    
+    return agg_df
+
+def SelectRangefromUniverseHourly(df_ranges, rangeStartMinute):
+    # df_range = df_range.query(f"interval >= '{rangeStart}' and interval < '{rangeEnd}'")
+    
+    query_sql = f"""
+    select 
+        sq.interval as interval,
+        sq.interval_size_minutes as interval_size_minutes, 
+        sq.open as open, sq.high as high, sq.low as low, sq.close as close, 
+        sq.high_timestamp as high_timestamp, 
+        sq.low_timestamp as low_timestamp,
+        sq.high_proportion_of_interval as high_proportion_of_interval,
+        sq.low_proportion_of_interval as low_proportion_of_interval,
+        sq.samples as samples, 
+        sq.first_sample as first_sample, sq.last_sample as last_sample 
+    from __s5__ as sq
+        where toMinute(sq.interval) = {rangeStartMinute}
+    order by sq.interval asc
+    ;
+    """
+    res = cdf.query(sql=query_sql, s5=df_ranges)
+    tzOffset = 'EST'
+    
+    dfres = res.to_pandas()
+    # dfres['interval'] = dfres['interval'] * 1e9
+    dfres['interval'] = dfres['interval'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['high_timestamp'] = dfres['high_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['low_timestamp'] = dfres['low_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['first_sample'] = dfres['first_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['last_sample'] = dfres['last_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    
+    return dfres
+
+def SelectRangefromUniverseDaily(df_ranges, rangeStartHour, rangeStartMinute):
+    # df_range = df_range.query(f"interval >= '{rangeStart}' and interval < '{rangeEnd}'")
+    tzOffset = 'EST'
+    query_sql = f"""
+    select 
+        sq.interval as interval, 
+        sq.interval_size_minutes as interval_size_minutes,
+        sq.open as open, sq.high as high, sq.low as low, sq.close as close, 
+        sq.high_timestamp as high_timestamp, 
+        sq.low_timestamp as low_timestamp,
+        sq.high_proportion_of_interval as high_proportion_of_interval,
+        sq.low_proportion_of_interval as low_proportion_of_interval,
+        sq.samples as samples, 
+        sq.first_sample as first_sample, sq.last_sample as last_sample 
+    from __s5__ as sq
+        where toHour(toDateTime(sq.interval, '{tzOffset}')) = {rangeStartHour} and toMinute(sq.interval) = {rangeStartMinute}
+    order by sq.interval asc
+    ;
+    """
+    res = cdf.query(sql=query_sql, s5=df_ranges)
+    
+    
+    dfres = res.to_pandas()
+    # dfres['interval'] = dfres['interval'] * 1e9
+    dfres['interval'] = dfres['interval'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['high_timestamp'] = dfres['high_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['low_timestamp'] = dfres['low_timestamp'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['first_sample'] = dfres['first_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    dfres['last_sample'] = dfres['last_sample'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    
+    return dfres
+
+
+class Range:
+    def __init__(self, interval, interval_size_minutes, open, high, low, close, high_timestamp, low_timestamp, high_proportion_of_interval, low_proportion_of_interval, samples, first_sample, last_sample):
+        self.interval = interval
+        self.interval_size_minutes = interval_size_minutes
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.high_timestamp = high_timestamp
+        self.low_timestamp = low_timestamp
+        self.high_proportion_of_interval = high_proportion_of_interval
+        self.low_proportion_of_interval = low_proportion_of_interval
+        self.samples = samples
+        self.first_sample = first_sample
+        self.last_sample = last_sample
+        self.activated_at = None
+        self.activated_at_pc = None
+        self.activated_direction = None
+        self.max_1st_displacement = 0
+        self.max_1st_displacement_pc = None
+        self.max_1st_displacement_at = None
+        self.max_1st_displacement_at_pc = None
+        self.max_activated_displacement = 0 #How far price moved form the range in the inital activation direction after the intial displacement
+        self.max_activated_displacement_pc = None
+        self.max_activated_displacement_at = None
+        self.max_activated_displacement_at_pc = None
+        self.return_to_range_qtl_at = None
+        self.return_to_range_qtl_at_pc = None
+        self.return_to_range_open_at = None
+        self.return_to_range_open_at_pc = None
+        self.return_to_range_open_prior_beyond_max_1st_price_displacement = None
+        self.return_to_range_eq_at = None
+        self.return_to_range_eq_at_pc = None
+        self.return_to_range_eq_prior_beyond_max_1st_price_displacement = None
+        self.return_to_range_extreme_at = None
+        self.return_to_range_extreme_at_pc = None
+        self.return_to_range_extreme_prior_beyond_max_1st_price_displacement = None
+        self.max_displacement_range_extreme = 0
+        self.max_displacement_range_extreme_pc = None
+        self.max_displacement_range_extreme_at = None
+        self.max_displacement_range_extreme_at_pc = None
+
+    def __repr__(self):
+        return f"Range(interval={self.interval}, open={self.open}, high={self.high}, low={self.low}, close={self.close})"
+# db = Session(path=dbpath)
+# tf='M1'
+# instrument = 'NAS100_USD'    
+# query = f"select * from quant.ohlc_agg where instrument='{instrument}' and tf='{tf}' order by interval"
+# dfres = db.query(query, 'dataframe')
+# dfres.head()
+
+#%% Generate Range Universe
+start = datetime(2024, 1, 1) #datetime(2024, 8, 31) 
+end = datetime(2024, 1, 8) #datetime(2024, 8, 31)
+instrument = 'NAS100_USD'
+minutes = 15
+# chdb.close()
+clearOHLCTable()
+df_range_universe = GenerateRangeOHLC(instrument, start, end, minutes)
+
+parquetSampleFile =f'{baseDataPath}oanda_data_pandas.parquet' 
+sample_df = loadOptimisedSampleData(parquetSampleFile)
+
+#%% Select Ranges of Interest
+rangeStartMinute = 0
+rangeStartHour = 10
+# df_ranges = SelectRangefromUniverseHourly(df_range_universe, rangeStartMinute) 
+df_ranges = SelectRangefromUniverseDaily(df_range_universe, rangeStartHour, rangeStartMinute) 
+df_ranges.head()
+# Range Size 
+# Range Start, Range End (Range Start + Range Size)
+
+# 1. Time since Range Formed that it was broken (% of range time)
+#  If Price <> Range High or Low then Range Broken - record the time and % of Range and that range has been broken
+# 2. Direction of Break (Long/Short)
+# 3. Maximum Price Displacement from Range before returning to Range (% of Range H/L) - Manipulation
+# 4. Time of Maximum Displacement (% of Range Time)
+# 5. Time Price returned to the Range (% of Range Time)
+# 6. Time Price returned to the Price at the start of the Range (Open) (% of Range)
+# 7. Does it return to the Price at the start of the Range (Open) before Displacing beyond 1st Max Displacement again
+# 8. Time Price returned to the EQ of the Range (% of Range)
+# 9. Does it get to EQ of the range before Displacing beyond 1st Max Displacement again
+# 10. Time Price returned to the Other side of the Range (% of Range)
+# 11. Does it get to the other side of the range before Displacing beyond 1st Max Displacement again
+# 12. Maximum Price Displacement from Other side of Range before returning to Range (% of Range H/L)
+# 13. Time of Maximum Price Displacement from Other side of Range (% of Range Time)
+computed_columns = [
+    'activated_at', 
+    'activated_at_pc', 
+    'activated_direction',
+    'max_1st_displacement',
+    'max_1st_displacement_pc',
+    'max_1st_displacement_at',
+    'max_1st_displacement_at_pc',
+    'max_activated_displacement',
+    'max_activated_displacement_pc',
+    'max_activated_displacement_at',
+    'max_activated_displacement_at_pc',
+    'return_to_range_qtl_at',
+    'return_to_range_qtl_at_pc',
+    'return_to_range_open_at',
+    'return_to_range_open_at_pc',
+    'return_to_range_open_prior_beyond_max_1st_price_displacement',
+    'return_to_range_eq_at',
+    'return_to_range_eq_at_pc',
+    'return_to_range_eq_prior_beyond_max_1st_price_displacement',
+    'return_to_range_extreme_at',
+    'return_to_range_extreme_at_pc',
+    'return_to_range_extreme_prior_beyond_max_1st_price_displacement',
+    'max_displacement_range_extreme',
+    'max_displacement_range_extreme_pc',
+    'max_displacement_range_extreme_at',
+    'max_displacement_range_extreme_at_pc',
+    ]
+# df_ranges = df_ranges.assign(computed_columns)
+df_ranges = df_ranges.reindex(columns=df_ranges.columns.tolist() + computed_columns)
+
+def GetS5DataFromRangeEnd(sample_df, instrument, start, end, tzOffset):
+    query_sql = f"""
+    select 
+        s5.timestamp as interval,
+        s5.open as open, s5.high as high, s5.low as low, s5.close as close
+        from __s5__ as s5
+        where s5.instrument='{instrument}' 
+        and s5.timestamp >= toDateTime('{start}', '{tzOffset}') 
+        and s5.timestamp < toDateTime('{end}', '{tzOffset}')
+        order by s5.timestamp asc
+    ;
+    """
+    res = cdf.query(sql=query_sql, s5=sample_df)
+
+    dfres = res.to_pandas()
+    # dfres['interval'] = dfres['interval'] * 1e9
+    dfres['interval'] = dfres['interval'].astype(pd.DatetimeTZDtype(tz=ZoneInfo(tzOffset)))
+    return dfres
+
+### Can be used to Evaluate Maximum Favourable Excursion from specific Ranges === Candles - e.g. test 02:00 H4 Candle PSP Expansion...
+def ProcessRange(r, df_post_range_data):
+    # print(f'Processing: {r.interval} Open: {r.open} High % of Interval: {r.high_proportion_of_interval}')
+    
+    for index, row in df_post_range_data.iterrows():
+        # if index < 4:
+        #     print(f'Processing: {index} - {row["interval"]} Open: {row["open"]} High: {row["high"]} Low: {row["low"]} Close: {row["close"]}')
+        # Activate Range = Trade above the range high or belwo the range low
+        if row['high'] > r.high and r.activated_at is None:
+            r.activated_at = row['interval']
+            r.activated_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+            r.activated_direction = 'Long'
+        if row['low'] < r.low and r.activated_at is None:
+            r.activated_at = row['interval']
+            r.activated_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+            r.activated_direction = 'Short'
+            
+        # 1st Displacement (Activation) from Range High/Low
+        if r.activated_direction == 'Long' and r.return_to_range_qtl_at is None:
+            r.max_1st_displacement = max(r.max_1st_displacement, row['high'] - r.high)
+            r.max_1st_displacement_pc = r.max_1st_displacement / (r.high - r.low)
+            r.max_1st_displacement_at = row['interval']
+            r.max_1st_displacement_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short'and r.return_to_range_qtl_at is None:
+            r.max_1st_displacement = max(r.max_1st_displacement, r.low - row['low'])
+            r.max_1st_displacement_pc = r.max_1st_displacement / (r.high - r.low)
+            r.max_1st_displacement_at = row['interval']
+            r.max_1st_displacement_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+            
+        # Max displacement from the Range High/Low after activation
+        if r.activated_direction == 'Long':
+            r.max_activated_displacement = max(r.max_activated_displacement, row['high'] - r.high)
+            r.max_activated_displacement_pc = r.max_activated_displacement / (r.high - r.low)
+            r.max_activated_displacement_at = row['interval']
+            r.max_activated_displacement_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short':
+            r.max_activated_displacement = max(r.max_activated_displacement, r.low - row['low'])
+            r.max_activated_displacement_pc = r.max_activated_displacement / (r.high - r.low)
+            r.max_activated_displacement_at = row['interval']
+            r.max_activated_displacement_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+
+        # Return to the Range (close belwo 1st Qtle) after Max Displacement ======= NEED appropriate hyterisis logic here to enable an expansion to get underway... Time?
+        if r.activated_direction == 'Long' and r.return_to_range_qtl_at is None and row['close'] < (r.high - (r.high - r.low) / 4):
+            r.return_to_range_qtl_at = row['interval']
+            r.return_to_range_qtl_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short' and r.return_to_range_qtl_at is None and row['close'] > (r.low + (r.high - r.low) / 4):
+            r.return_to_range_qtl_at = row['interval']
+            r.return_to_range_qtl_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        
+        # Trade back to the Range Open
+        if r.activated_direction == 'Long' and r.return_to_range_open_at is None and row['low'] < r.open:
+            r.return_to_range_open_at = row['interval']
+            r.return_to_range_open_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short' and r.return_to_range_open_at is None and row['high'] > r.open:
+            r.return_to_range_open_at = row['interval']
+            r.return_to_range_open_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+           
+        # Return to the Range Open before Displacing beyond 1st Max Displacement again
+        if r.activated_direction == 'Long' and r.return_to_range_open_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_open_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_open_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_open_prior_beyond_max_1st_price_displacement = False
+        if r.activated_direction == 'Short' and r.return_to_range_open_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_open_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_open_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_open_prior_beyond_max_1st_price_displacement = False
+        # EQ
+        if r.activated_direction == 'Long' and r.return_to_range_eq_at is None and row['low'] < (r.high - (r.high - r.low) / 2):
+            r.return_to_range_eq_at = row['interval']
+            r.return_to_range_eq_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short' and r.return_to_range_eq_at is None and row['high'] > (r.low + (r.high - r.low) / 2):
+            r.return_to_range_eq_at = row['interval']
+            r.return_to_range_eq_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+            
+        # Return to the Range EQ before Displacing beyond 1st Max Displacement again
+        if r.activated_direction == 'Long' and r.return_to_range_eq_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_eq_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_eq_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_eq_prior_beyond_max_1st_price_displacement = False
+        if r.activated_direction == 'Short' and r.return_to_range_eq_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_eq_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_eq_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_eq_prior_beyond_max_1st_price_displacement = False
+            
+        # Extreme
+        if r.activated_direction == 'Long' and r.return_to_range_extreme_at is None and row['low'] < r.low:
+            r.return_to_range_extreme_at = row['interval']
+            r.return_to_range_extreme_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short' and r.return_to_range_extreme_at is None and row['high'] > r.high:
+            r.return_to_range_extreme_at = row['interval']
+            r.return_to_range_extreme_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+            
+        # Return to the Range Extreme before Displacing beyond 1st Max Displacement again   
+        if r.activated_direction == 'Long' and r.return_to_range_extreme_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_extreme_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_extreme_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_extreme_prior_beyond_max_1st_price_displacement = False
+        if r.activated_direction == 'Short' and r.return_to_range_extreme_prior_beyond_max_1st_price_displacement is None and r.max_activated_displacement_at is not None and r.return_to_range_extreme_at is not None:
+            if r.max_activated_displacement < r.max_1st_displacement:
+                r.return_to_range_extreme_prior_beyond_max_1st_price_displacement = True
+            else:
+                r.return_to_range_extreme_prior_beyond_max_1st_price_displacement = False
+                
+        # Extreme Displacement
+        if r.activated_direction == 'Long' and r.max_displacement_range_extreme_at is None:
+            r.max_displacement_range_extreme = max(r.max_displacement_range_extreme, r.low - row['low'])
+            r.max_displacement_range_extreme_pc = r.max_displacement_range_extreme / (r.high - r.low)
+            r.max_displacement_range_extreme_at = row['interval']
+            r.max_displacement_range_extreme_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        if r.activated_direction == 'Short' and r.max_displacement_range_extreme_at is None:
+            r.max_displacement_range_extreme = max(r.max_displacement_range_extreme,  row['high'] - r.high)
+            r.max_displacement_range_extreme_pc = r.max_displacement_range_extreme / (r.high - r.low)
+            r.max_displacement_range_extreme_at = row['interval']
+            r.max_displacement_range_extreme_at_pc = ((row['interval'] - (r.interval + timedelta(minutes=r.interval_size_minutes))) / timedelta(minutes=r.interval_size_minutes))
+        
+    print(r)
+    return r
+
+
+instrument = 'NAS100_USD'
+# df_ranges.head()
+for index, row in df_ranges.iterrows():
+    # print(f'Processing: {index} - {row["interval"]} Open: {row["open"]} High % of Interval: {row["high_proportion_of_interval"]}')
+    r = Range(row['interval'], row['interval_size_minutes'], row['open'], row['high'], row['low'], row['close'], row['high_timestamp'], row['low_timestamp'], row['high_proportion_of_interval'], row['low_proportion_of_interval'], row['samples'], row['first_sample'], row['last_sample'])
+    
+    #Need to get Date Time into UTC then convert back to EST in the SQL,.... argggh
+    ts = pd.Timestamp(r.interval)
+    # print(ts)
+    # ts = ts.tz_convert('UTC')
+    # print(ts)
+    ts = ts.tz_localize(tz=None)
+    # print(ts)
+    tsEnd = ts + timedelta(days=10)
+    # print(tsEnd)
+    df_post_range_data = GetS5DataFromRangeEnd(sample_df, instrument, ts, tsEnd, 'EST')
+    # df_post_range_data.head()
+    r = ProcessRange(r, df_post_range_data)
+    print(f'Range: {r.interval} \n activated_at: {r.activated_at} \n activated_direction: {r.activated_direction} \n activated_at_pc: {r.activated_at_pc}\n',
+          f'max_1st_displacement {r.max_1st_displacement} \n max_1st_displacement_pc: {r.max_1st_displacement_pc} \n max_1st_displacement_at: {r.max_1st_displacement_at}\n max_1st_displacement_at_pc: {r.max_1st_displacement_at_pc}\n',
+          f'max_activated_displacement {r.max_activated_displacement} \n max_activated_displacement_pc: {r.max_activated_displacement_pc} \n max_activated_displacement_at: {r.max_activated_displacement_at}\n max_activated_displacement_at_pc: {r.max_activated_displacement_at_pc}\n',
+          f'return_to_range_qtl_at: {r.return_to_range_qtl_at} \n return_to_range_qtl_at_pc: {r.return_to_range_qtl_at_pc}\n',
+          f'return_to_range_open_at: {r.return_to_range_open_at} \n return_to_range_open_at_pc: {r.return_to_range_open_at_pc}\n',
+          f'return_to_range_open_prior_beyond_max_1st_price_displacement: {r.return_to_range_open_prior_beyond_max_1st_price_displacement}\n',
+          f'return_to_range_eq_at: {r.return_to_range_eq_at} \n return_to_range_eq_at_pc: {r.return_to_range_eq_at_pc}\n',
+          f'return_to_range_eq_prior_beyond_max_1st_price_displacement: {r.return_to_range_eq_prior_beyond_max_1st_price_displacement}\n',
+          f'return_to_range_extreme_at: {r.return_to_range_extreme_at} \n return_to_range_extreme_at_pc: {r.return_to_range_extreme_at_pc}\n',
+          f'return_to_range_extreme_prior_beyond_max_1st_price_displacement: {r.return_to_range_extreme_prior_beyond_max_1st_price_displacement}\n',
+          f'max_displacement_range_extreme: {r.max_displacement_range_extreme} \n max_displacement_range_extreme_pc: {r.max_displacement_range_extreme_pc}\n',
+          f'max_displacement_range_extreme_at: {r.max_displacement_range_extreme_at} \n max_displacement_range_extreme_at_pc: {r.max_displacement_range_extreme_at_pc}\n',
+          f'interval: {r.interval} \n open: {r.open} \n high: {r.high} \n low: {r.low} \n close: {r.close}\n',
+          )
+    # Insert the newly computed fields of Range r into the df_ranges dataframe
+    df_ranges.at[index, 'activated_at'] = r.activated_at
+    df_ranges.at[index, 'activated_at_pc'] = r.activated_at_pc
+    df_ranges.at[index, 'activated_direction'] = r.activated_direction
+    df_ranges.at[index, 'max_1st_displacement'] = r.max_1st_displacement
+    df_ranges.at[index, 'max_1st_displacement_pc'] = r.max_1st_displacement_pc
+    df_ranges.at[index, 'max_1st_displacement_at'] = r.max_1st_displacement_at
+    df_ranges.at[index, 'max_1st_displacement_at_pc'] = r.max_1st_displacement_at_pc
+    df_ranges.at[index, 'max_activated_displacement'] = r.max_activated_displacement
+    df_ranges.at[index, 'max_activated_displacement_pc'] = r.max_activated_displacement_pc
+    df_ranges.at[index, 'max_activated_displacement_at'] = r.max_activated_displacement_at
+    df_ranges.at[index, 'max_activated_displacement_at_pc'] = r.max_activated_displacement_at_pc
+    df_ranges.at[index, 'return_to_range_qtl_at'] = r.return_to_range_qtl_at
+    df_ranges.at[index, 'return_to_range_qtl_at_pc'] = r.return_to_range_qtl_at_pc
+    df_ranges.at[index, 'return_to_range_open_at'] = r.return_to_range_open_at
+    df_ranges.at[index, 'return_to_range_open_at_pc'] = r.return_to_range_open_at_pc
+    df_ranges.at[index, 'return_to_range_open_prior_beyond_max_1st_price_displacement'] = r.return_to_range_open_prior_beyond_max_1st_price_displacement
+    df_ranges.at[index, 'return_to_range_eq_at'] = r.return_to_range_eq_at
+    df_ranges.at[index, 'return_to_range_eq_at_pc'] = r.return_to_range_eq_at_pc
+    df_ranges.at[index, 'return_to_range_eq_prior_beyond_max_1st_price_displacement'] = r.return_to_range_eq_prior_beyond_max_1st_price_displacement
+    df_ranges.at[index, 'return_to_range_extreme_at'] = r.return_to_range_extreme_at
+    df_ranges.at[index, 'return_to_range_extreme_at_pc'] = r.return_to_range_extreme_at_pc
+    df_ranges.at[index, 'return_to_range_extreme_prior_beyond_max_1st_price_displacement'] = r.return_to_range_extreme_prior_beyond_max_1st_price_displacement
+    df_ranges.at[index, 'max_displacement_range_extreme'] = r.max_displacement_range_extreme
+    df_ranges.at[index, 'max_displacement_range_extreme_pc'] = r.max_displacement_range_extreme_pc
+    df_ranges.at[index, 'max_displacement_range_extreme_at'] = r.max_displacement_range_extreme_at
+    df_ranges.at[index, 'max_displacement_range_extreme_at_pc'] = r.max_displacement_range_extreme_at_pc
+    
+print(df_ranges.head(10))
+
+
+    
+            
 
 # %% Execution:
 start = datetime(2024, 1, 1) #datetime(2024, 8, 31) 
@@ -519,4 +1000,14 @@ clearOHLCTable()
 GenerateMinuteOHLC(instrument, start, end, minutes)
 # 2024-08-26 23:00 - last Hour 
 # Look at https://clickhouse.com/docs/sql-reference/window-functions/lagInFrame
+# %%
+start = datetime(2024, 1, 1, 10)
+ts = pd.Timestamp(start)
+print(ts)
+ts = ts.tz_localize('UTC').tz_convert('EST')
+print(ts)
+ts = ts.tz_convert('UTC')
+print(ts)
+ts = ts.tz_localize(tz=None)
+print(ts)
 # %%
